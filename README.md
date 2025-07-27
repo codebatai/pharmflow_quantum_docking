@@ -1,60 +1,68 @@
-# PharmFlow Quantum Molecular Docking
+# PharmFlow: Quantum-Enhanced Molecular Docking
 
-![PharmFlow Logo](https://img.shields.io/badge/PharmFlow-Quantum%20Docking-blue)
-![Qiskit](https://img.shields.io/badge/Qiskit-1.0+-green)
-![Python](https://img.shields.io/badge/Python-3.8+-blue)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Qiskit](https://img.shields.io/badge/Qiskit-0.45+-green.svg)](https://qiskit.org/)
 
-**QAOA and Pharmacophore-Optimized Quantum Molecular Docking Solution**
+🧬 **Revolutionary quantum molecular docking platform combining QAOA optimization with pharmacophore-guided drug discovery**
 
-PharmFlow presents an innovative quantum molecular docking algorithm that combines cutting-edge QAOA (Quantum Approximate Optimization Algorithm) technology with pharmacophore-based methods, specifically optimized for the Qiskit Chemistry framework.
+## 🌟 Overview
 
-## 🚀 **Key Features**
+PharmFlow represents a breakthrough in computational drug discovery, leveraging quantum computing to revolutionize molecular docking. By integrating **Quantum Approximate Optimization Algorithm (QAOA)** with advanced pharmacophore modeling, PharmFlow delivers unprecedented accuracy and efficiency in protein-ligand interaction prediction.
 
-- **🧬 Hybrid QAOA-VQE Architecture**: 1000x faster than classical methods
-- **⚗️ Pharmacophore Quantum Encoding**: 80% reduction in qubit requirements  
-- **🌊 Dynamic Smoothing Filter**: 300% improvement in convergence speed
-- **🎯 Multi-objective Optimization**: Simultaneous optimization of binding affinity and ADMET
-- **🔬 Qiskit Chemistry Integration**: Native integration with Qiskit ecosystem
+### 🚀 Key Features
 
-## 📊 **Performance Benchmarks**
+- **🔬 Quantum-Enhanced Docking**: QAOA-powered optimization for superior chemical space exploration
+- **💊 Pharmacophore-Guided Design**: Intelligent feature extraction and encoding for enhanced binding prediction
+- **⚡ Multi-Objective Optimization**: Balance binding affinity, selectivity, and ADMET properties
+- **🌐 Scalable Architecture**: From single molecules to large-scale virtual screening campaigns
+- **📊 Comprehensive Analysis**: Detailed molecular property assessment and visualization
+- **🤝 Classical Integration**: Seamless hybrid quantum-classical workflows
 
-| Metric | Traditional Methods | PharmFlow-QAOA | Improvement |
-|--------|-------------------|----------------|-------------|
-| **Accuracy (RMSD < 2Å)** | 78.3% | **87.6%** | +5.5% |
-| **Computation Time** | 45 min | **2.7 min** | **17x faster** |
-| **Batch Processing** | 1x | **32x** | **32x parallel** |
+### 🎯 Applications
 
-## 🛠 **Installation**
+- **Drug Discovery**: Accelerated lead identification and optimization
+- **Virtual Screening**: Large-scale compound library evaluation
+- **Drug Repurposing**: Novel therapeutic applications for existing drugs
+- **Target Validation**: Protein-ligand interaction analysis
+- **ADMET Prediction**: Comprehensive pharmacokinetic assessment
 
-### **Requirements**
-- Python 3.8+
-- Qiskit >= 1.0.0
-- RDKit >= 2023.3.1
+## 🛠️ Installation
 
-### **Quick Install**
+### Prerequisites
+
+- Python 3.8 or higher
+- Conda or pip package manager
+- Optional: IBM Quantum Experience account for quantum hardware access
+
+### Quick Installation
+
 ```bash
-git clone https://github.com/pharmflow/quantum-docking.git
-cd pharmflow_quantum_docking
+# Clone the repository
+git clone https://github.com/your-username/pharmflow-quantum-docking.git
+cd pharmflow-quantum-docking
+
+# Create conda environment
+conda create -n pharmflow python=3.8
+conda activate pharmflow
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install PharmFlow
 pip install -e .
 ```
-### **Citations**
-If you use PharmFlow in your research, please cite:
-bibtex@software{pharmflow_quantum_docking_2025,
-  author = {PharmFlow/Codebat Technology},
-  title = {PharmFlow: QAOA and Pharmacophore-Optimized Quantum Molecular Docking},
-  url = {https://github.com/pharmflow/quantum-docking},
-  year = {2025},
-  version = {1.0.0}
-}
-### **Acknowledgments**
-- **Qiskit Team**: For the quantum computing framework
-- **RDKit Community**: For molecular processing tools
-- **OpenFermion Team**: For quantum chemistry utilities
 
-### **Contact**
+## 📜 License
 
--  **Website**: https://pharmflow.ai
--  **Issues**: GitHub Issues
--  **Discussions**: GitHub Discussions
--  **Email**: contact@pharmflow.ai
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
+
+### License Summary
+
+- ✅ **Commercial Use**: You can use this software for commercial purposes
+- ✅ **Modification**: You can modify the source code
+- ✅ **Distribution**: You can distribute this software
+- ✅ **Patent Use**: Express grant of patent rights from contributors
+- ✅ **Private Use**: You can use this software privately
+- ⚠️ **License and Copyright Notice**: Must include original license and copyright notice
+- ⚠️ **State Changes**: Must indicate changes made to the original software
