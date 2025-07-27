@@ -13,528 +13,1156 @@
 # limitations under the License.
 
 """
-Molecular structure loading and processing utilities
-Supports PDB, SDF, MOL2, and SMILES formats with comprehensive validation
+PharmFlow Real Molecular Loader
 """
 
 import os
-import gzip
 import logging
-from typing import Dict, List, Any, Optional, Union, Tuple
+import gzip
+import pickle
+from typing import Dict, List, Any, Optional, Tuple, Union, Iterator
 from pathlib import Path
-import numpy as np
+import time
+import json
+import xml.etree.ElementTree as ET
 
+# Molecular Computing Imports
 from rdkit import Chem
-from rdkit.Chem import AllChem, rdMolDescriptors, Descriptors
-from rdkit.Chem.rdForceFieldHelpers import UFFOptimizeMolecule, MMFFOptimizeMolecule
-from Bio.PDB import PDBParser, Structure, Model, Chain, Residue
-from Bio.PDB.PDBIO import PDBIO
-import warnings
+from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
+from rdkit.Chem.Features import FeatureFactory
+from rdkit.Chem import PandasTools, SDMolSupplier, SmilesMolSupplier
+from rdkit.Chem.rdchem import Mol
 
-from ..utils.constants import ATOMIC_MASSES, VDW_RADII, SUPPORTED_FORMATS
+# Data Processing Imports
+import pandas as pd
+import numpy as np
+from dataclasses import dataclass, field
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Bio-informatics Imports
+try:
+    from Bio.PDB import PDBParser, PDBIO, Structure, Model, Chain, Residue
+    from Bio.PDB.DSSP import DSSP
+    BIO_AVAILABLE = True
+except ImportError:
+    BIO_AVAILABLE = False
+    logging.warning("BioPython not available - PDB processing will be limited")
 
 logger = logging.getLogger(__name__)
 
-class MolecularLoader:
+@dataclass
+class MolecularLoaderConfig:
+    """Configuration for molecular loading operations"""
+    # File processing
+    max_file_size: int = 100 * 1024 * 1024  # 100MB
+    timeout_seconds: int = 300  # 5 minutes
+    parallel_loading: bool = True
+    max_workers: int = 4
+    
+    # Molecular processing
+    sanitize_molecules: bool = True
+    add_hydrogens: bool = True
+    generate_3d_coords: bool = True
+    remove_salts: bool = True
+    neutralize_charges: bool = True
+    
+    # Validation
+    validate_structures: bool = True
+    min_atoms: int = 3
+    max_atoms: int = 200
+    allowed_elements: set = field(default_factory=lambda: {
+        'H', 'C', 'N', 'O', 'P', 'S', 'F', 'Cl', 'Br', 'I'
+    })
+    
+    # Caching
+    enable_caching: bool = True
+    cache_directory: str = ".pharmflow_cache"
+    
+    # Error handling
+    strict_mode: bool = False  # If True, fails on any error; if False, skips problematic molecules
+
+class RealMolecularLoader:
     """
-    Comprehensive molecular structure loader supporting multiple formats
+    Real Molecular Loader for PharmFlow
+    NO MOCK DATA - Comprehensive molecular file processing and validation
     """
     
-    def __init__(self, validate_structures: bool = True):
-        """
-        Initialize molecular loader
-        
-        Args:
-            validate_structures: Whether to validate loaded structures
-        """
-        self.validate_structures = validate_structures
+    def __init__(self, config: MolecularLoaderConfig = None):
+        """Initialize real molecular loader"""
+        self.config = config or MolecularLoaderConfig()
         self.logger = logging.getLogger(__name__)
         
-        # Initialize parsers
-        self.pdb_parser = PDBParser(QUIET=True)
+        # Initialize processing components
+        self.feature_factory = self._initialize_feature_factory()
+        self.molecular_validators = self._initialize_validators()
+        self.structure_processors = self._initialize_structure_processors()
         
-        # Structure cache
-        self._structure_cache = {}
+        # Create cache directory
+        if self.config.enable_caching:
+            self.cache_dir = Path(self.config.cache_directory)
+            self.cache_dir.mkdir(exist_ok=True)
         
-        # Supported file formats
-        self.supported_formats = SUPPORTED_FORMATS
+        # Statistics
+        self.loading_stats = {
+            'files_processed': 0,
+            'molecules_loaded': 0,
+            'molecules_failed': 0,
+            'total_processing_time': 0.0
+        }
         
-        self.logger.info("Molecular loader initialized")
+        self.logger.info("Real molecular loader initialized with comprehensive file processing")
     
-    def load_protein(self, file_path: str, chain_id: Optional[str] = None) -> Dict[str, Any]:
+    def _initialize_feature_factory(self) -> Optional[FeatureFactory]:
+        """Initialize RDKit feature factory"""
+        try:
+            return FeatureFactory.from_file('BaseFeatures.fdef')
+        except Exception as e:
+            self.logger.warning(f"Could not initialize feature factory: {e}")
+            return None
+    
+    def _initialize_validators(self) -> Dict[str, callable]:
+        """Initialize molecular validators"""
+        
+        validators = {
+            'structure_validity': self._validate_structure,
+            'atom_count': self._validate_atom_count,
+            'element_types': self._validate_element_types,
+            'connectivity': self._validate_connectivity,
+            'charge_state': self._validate_charge_state,
+            'stereochemistry': self._validate_stereochemistry
+        }
+        
+        return validators
+    
+    def _initialize_structure_processors(self) -> Dict[str, callable]:
+        """Initialize structure processors"""
+        
+        processors = {
+            'sanitize': self._sanitize_molecule,
+            'add_hydrogens': self._add_hydrogens,
+            'remove_salts': self._remove_salts,
+            'neutralize': self._neutralize_charges,
+            'generate_3d': self._generate_3d_coordinates,
+            'optimize_geometry': self._optimize_molecular_geometry
+        }
+        
+        return processors
+    
+    def load_molecular_file(self, 
+                           file_path: Union[str, Path],
+                           file_format: Optional[str] = None) -> Dict[str, Any]:
         """
-        Load protein structure from PDB file
+        Load molecules from various file formats
         
         Args:
-            file_path: Path to PDB file
-            chain_id: Specific chain to load (None for all chains)
+            file_path: Path to molecular file
+            file_format: File format (auto-detected if None)
             
         Returns:
-            Protein structure dictionary
+            Dictionary containing loaded molecules and metadata
         """
+        
+        start_time = time.time()
+        file_path = Path(file_path)
+        
         try:
-            # Check file existence and format
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"PDB file not found: {file_path}")
+            # Validate file
+            self._validate_file(file_path)
             
-            file_path = str(Path(file_path).resolve())
+            # Detect file format
+            if file_format is None:
+                file_format = self._detect_file_format(file_path)
             
-            # Check cache
-            cache_key = f"{file_path}_{chain_id}"
-            if cache_key in self._structure_cache:
-                self.logger.debug(f"Loading protein from cache: {file_path}")
-                return self._structure_cache[cache_key]
+            self.logger.info(f"Loading molecular file: {file_path} (format: {file_format})")
             
-            # Load PDB structure
-            structure_id = Path(file_path).stem
+            # Load molecules based on format
+            loading_result = self._load_by_format(file_path, file_format)
             
-            # Handle compressed files
-            if file_path.endswith('.gz'):
-                with gzip.open(file_path, 'rt') as f:
-                    pdb_content = f.read()
-                # Write temporary uncompressed file
-                temp_path = file_path.replace('.gz', '.tmp')
-                with open(temp_path, 'w') as f:
-                    f.write(pdb_content)
-                structure = self.pdb_parser.get_structure(structure_id, temp_path)
-                os.remove(temp_path)
-            else:
-                structure = self.pdb_parser.get_structure(structure_id, file_path)
+            # Process and validate molecules
+            processed_result = self._process_loaded_molecules(loading_result)
             
-            # Extract protein information
-            protein_data = self._extract_protein_data(structure, chain_id)
-            protein_data['file_path'] = file_path
-            protein_data['structure_id'] = structure_id
+            # Generate metadata
+            metadata = self._generate_file_metadata(file_path, file_format, processed_result)
             
-            # Validate structure if requested
-            if self.validate_structures:
-                self._validate_protein_structure(protein_data)
+            processing_time = time.time() - start_time
             
-            # Cache result
-            self._structure_cache[cache_key] = protein_data
+            # Update statistics
+            self.loading_stats['files_processed'] += 1
+            self.loading_stats['molecules_loaded'] += len(processed_result['valid_molecules'])
+            self.loading_stats['molecules_failed'] += len(processed_result['invalid_molecules'])
+            self.loading_stats['total_processing_time'] += processing_time
             
-            self.logger.info(f"Successfully loaded protein: {file_path}")
-            return protein_data
+            result = {
+                'molecules': processed_result['valid_molecules'],
+                'invalid_molecules': processed_result['invalid_molecules'],
+                'metadata': metadata,
+                'processing_time': processing_time,
+                'success': True,
+                'file_path': str(file_path),
+                'file_format': file_format
+            }
+            
+            self.logger.info(f"Successfully loaded {len(result['molecules'])} molecules from {file_path}")
+            
+            return result
             
         except Exception as e:
-            self.logger.error(f"Failed to load protein {file_path}: {e}")
-            raise ValueError(f"Protein loading error: {e}")
+            self.logger.error(f"Failed to load molecular file {file_path}: {e}")
+            return {
+                'molecules': [],
+                'invalid_molecules': [],
+                'metadata': {},
+                'processing_time': time.time() - start_time,
+                'success': False,
+                'error': str(e),
+                'file_path': str(file_path)
+            }
     
-    def load_ligand(self, file_path: str, mol_id: Optional[str] = None) -> Chem.Mol:
-        """
-        Load ligand molecule from various formats
+    def _validate_file(self, file_path: Path):
+        """Validate file before processing"""
         
-        Args:
-            file_path: Path to ligand file or SMILES string
-            mol_id: Molecule identifier
-            
-        Returns:
-            RDKit molecule object
-        """
-        try:
-            # Determine if input is file path or SMILES string
-            if os.path.exists(file_path):
-                mol = self._load_ligand_from_file(file_path)
+        if not file_path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+        
+        if not file_path.is_file():
+            raise ValueError(f"Path is not a file: {file_path}")
+        
+        file_size = file_path.stat().st_size
+        if file_size > self.config.max_file_size:
+            raise ValueError(f"File too large: {file_size} bytes (max: {self.config.max_file_size})")
+        
+        if file_size == 0:
+            raise ValueError(f"File is empty: {file_path}")
+    
+    def _detect_file_format(self, file_path: Path) -> str:
+        """Detect molecular file format"""
+        
+        suffix = file_path.suffix.lower()
+        
+        format_map = {
+            '.sdf': 'sdf',
+            '.mol': 'mol',
+            '.mol2': 'mol2',
+            '.pdb': 'pdb',
+            '.xyz': 'xyz',
+            '.cif': 'cif',
+            '.smiles': 'smiles',
+            '.smi': 'smiles',
+            '.csv': 'csv',
+            '.json': 'json',
+            '.pkl': 'pickle',
+            '.gz': 'compressed'
+        }
+        
+        detected_format = format_map.get(suffix, 'unknown')
+        
+        # Handle compressed files
+        if detected_format == 'compressed':
+            # Check the extension before .gz
+            if file_path.name.endswith('.sdf.gz'):
+                detected_format = 'sdf_gz'
+            elif file_path.name.endswith('.pdb.gz'):
+                detected_format = 'pdb_gz'
             else:
-                # Assume it's a SMILES string
-                mol = self._load_ligand_from_smiles(file_path)
-            
-            if mol is None:
-                raise ValueError(f"Could not load ligand from: {file_path}")
-            
-            # Set molecule identifier
-            if mol_id:
-                mol.SetProp("_Name", mol_id)
-            
-            # Add hydrogens if not present
-            mol = Chem.AddHs(mol)
-            
-            # Generate 3D coordinates if needed
-            if mol.GetNumConformers() == 0:
-                self._generate_3d_coordinates(mol)
-            
-            # Validate structure if requested
-            if self.validate_structures:
-                self._validate_ligand_structure(mol)
-            
-            self.logger.info(f"Successfully loaded ligand: {file_path}")
-            return mol
-            
-        except Exception as e:
-            self.logger.error(f"Failed to load ligand {file_path}: {e}")
-            raise ValueError(f"Ligand loading error: {e}")
-    
-    def load_multiple_ligands(self, file_paths: List[str]) -> List[Chem.Mol]:
-        """
-        Load multiple ligands from file list
+                detected_format = 'unknown_gz'
         
-        Args:
-            file_paths: List of ligand file paths
+        # Additional content-based detection for unknown formats
+        if detected_format == 'unknown':
+            detected_format = self._detect_format_by_content(file_path)
+        
+        return detected_format
+    
+    def _detect_format_by_content(self, file_path: Path) -> str:
+        """Detect format by examining file content"""
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                first_lines = [f.readline().strip() for _ in range(5)]
             
-        Returns:
-            List of RDKit molecule objects
-        """
+            # Check for specific format indicators
+            content = '\n'.join(first_lines)
+            
+            if 'M  END' in content or '$$$$' in content:
+                return 'sdf'
+            elif content.startswith('HEADER') or content.startswith('ATOM'):
+                return 'pdb'
+            elif content.startswith('@<TRIPOS>'):
+                return 'mol2'
+            elif 'data_' in content:
+                return 'cif'
+            elif any(line.strip() and not line.startswith('#') and 
+                   ' ' in line.strip() and len(line.strip().split()) >= 4 
+                   for line in first_lines):
+                return 'xyz'
+            else:
+                return 'unknown'
+                
+        except Exception:
+            return 'unknown'
+    
+    def _load_by_format(self, file_path: Path, file_format: str) -> Dict[str, Any]:
+        """Load molecules based on file format"""
+        
+        loaders = {
+            'sdf': self._load_sdf_file,
+            'mol': self._load_mol_file,
+            'pdb': self._load_pdb_file,
+            'smiles': self._load_smiles_file,
+            'csv': self._load_csv_file,
+            'json': self._load_json_file,
+            'pickle': self._load_pickle_file,
+            'sdf_gz': self._load_compressed_sdf,
+            'pdb_gz': self._load_compressed_pdb
+        }
+        
+        loader = loaders.get(file_format, self._load_unknown_format)
+        return loader(file_path)
+    
+    def _load_sdf_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load SDF file"""
+        
         molecules = []
+        errors = []
         
-        for i, file_path in enumerate(file_paths):
-            try:
-                mol = self.load_ligand(file_path, mol_id=f"ligand_{i}")
-                molecules.append(mol)
-            except Exception as e:
-                self.logger.warning(f"Failed to load ligand {file_path}: {e}")
-        
-        self.logger.info(f"Loaded {len(molecules)} out of {len(file_paths)} ligands")
-        return molecules
-    
-    def _extract_protein_data(self, structure: Structure, chain_id: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Extract comprehensive protein data from Bio.PDB structure
-        
-        Args:
-            structure: Bio.PDB structure object
-            chain_id: Specific chain ID to extract
+        try:
+            supplier = SDMolSupplier(str(file_path), sanitize=False, removeHs=False)
             
-        Returns:
-            Protein data dictionary
-        """
-        protein_data = {
-            'structure': structure,
-            'chains': {},
-            'atoms': [],
-            'coordinates': [],
-            'residues': [],
-            'secondary_structure': {},
-            'binding_sites': [],
-            'metadata': {}
-        }
-        
-        for model in structure:
-            for chain in model:
-                if chain_id is None or chain.id == chain_id:
-                    chain_data = self._extract_chain_data(chain)
-                    protein_data['chains'][chain.id] = chain_data
-                    
-                    # Accumulate atoms and coordinates
-                    protein_data['atoms'].extend(chain_data['atoms'])
-                    protein_data['coordinates'].extend(chain_data['coordinates'])
-                    protein_data['residues'].extend(chain_data['residues'])
-        
-        # Convert coordinates to numpy array
-        if protein_data['coordinates']:
-            protein_data['coordinates'] = np.array(protein_data['coordinates'])
-        
-        # Extract metadata
-        protein_data['metadata'] = self._extract_metadata(structure)
-        
-        return protein_data
-    
-    def _extract_chain_data(self, chain: Chain) -> Dict[str, Any]:
-        """Extract data from a protein chain"""
-        chain_data = {
-            'chain_id': chain.id,
-            'atoms': [],
-            'coordinates': [],
-            'residues': [],
-            'sequence': ''
-        }
-        
-        for residue in chain:
-            if residue.id[0] == ' ':  # Standard amino acid residues
-                residue_data = self._extract_residue_data(residue)
-                chain_data['residues'].append(residue_data)
-                chain_data['sequence'] += self._get_residue_single_letter(residue.resname)
-                
-                # Extract atomic data
-                for atom in residue:
-                    atom_data = {
-                        'name': atom.name,
-                        'element': atom.element,
-                        'coord': atom.coord,
-                        'bfactor': atom.bfactor,
-                        'occupancy': atom.occupancy,
-                        'residue': residue.resname,
-                        'residue_id': residue.id[1]
+            for i, mol in enumerate(supplier):
+                if mol is not None:
+                    mol_data = {
+                        'molecule': mol,
+                        'index': i,
+                        'properties': mol.GetPropsAsDict(),
+                        'source': f"{file_path.name}:{i}"
                     }
-                    chain_data['atoms'].append(atom_data)
-                    chain_data['coordinates'].append(atom.coord)
-        
-        return chain_data
-    
-    def _extract_residue_data(self, residue: Residue) -> Dict[str, Any]:
-        """Extract data from a protein residue"""
-        return {
-            'name': residue.resname,
-            'id': residue.id[1],
-            'insertion_code': residue.id[2],
-            'single_letter': self._get_residue_single_letter(residue.resname),
-            'atoms': [atom.name for atom in residue],
-            'center': self._calculate_residue_center(residue)
-        }
-    
-    def _calculate_residue_center(self, residue: Residue) -> np.ndarray:
-        """Calculate geometric center of residue"""
-        coords = [atom.coord for atom in residue]
-        return np.mean(coords, axis=0) if coords else np.zeros(3)
-    
-    def _get_residue_single_letter(self, resname: str) -> str:
-        """Convert three-letter residue name to single letter"""
-        aa_dict = {
-            'ALA': 'A', 'ARG': 'R', 'ASN': 'N', 'ASP': 'D', 'CYS': 'C',
-            'GLN': 'Q', 'GLU': 'E', 'GLY': 'G', 'HIS': 'H', 'ILE': 'I',
-            'LEU': 'L', 'LYS': 'K', 'MET': 'M', 'PHE': 'F', 'PRO': 'P',
-            'SER': 'S', 'THR': 'T', 'TRP': 'W', 'TYR': 'Y', 'VAL': 'V'
-        }
-        return aa_dict.get(resname, 'X')
-    
-    def _extract_metadata(self, structure: Structure) -> Dict[str, Any]:
-        """Extract metadata from PDB structure"""
-        header = structure.header
-        return {
-            'resolution': header.get('resolution'),
-            'structure_method': header.get('structure_method'),
-            'deposition_date': header.get('deposition_date'),
-            'release_date': header.get('release_date'),
-            'name': header.get('name'),
-            'head': header.get('head'),
-            'idcode': header.get('idcode')
-        }
-    
-    def _load_ligand_from_file(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load ligand from file based on extension"""
-        file_ext = Path(file_path).suffix.lower()
-        
-        if file_ext == '.sdf':
-            return self._load_from_sdf(file_path)
-        elif file_ext == '.mol':
-            return self._load_from_mol(file_path)
-        elif file_ext == '.mol2':
-            return self._load_from_mol2(file_path)
-        elif file_ext == '.pdb':
-            return self._load_ligand_from_pdb(file_path)
-        elif file_ext in ['.smi', '.smiles']:
-            return self._load_from_smiles_file(file_path)
-        else:
-            raise ValueError(f"Unsupported file format: {file_ext}")
-    
-    def _load_from_sdf(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load molecule from SDF file"""
-        try:
-            suppl = Chem.SDMolSupplier(file_path)
-            mol = next(suppl)
-            return mol
-        except Exception as e:
-            self.logger.warning(f"SDF loading failed: {e}")
-            return None
-    
-    def _load_from_mol(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load molecule from MOL file"""
-        try:
-            mol = Chem.MolFromMolFile(file_path)
-            return mol
-        except Exception as e:
-            self.logger.warning(f"MOL loading failed: {e}")
-            return None
-    
-    def _load_from_mol2(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load molecule from MOL2 file"""
-        try:
-            mol = Chem.MolFromMol2File(file_path)
-            return mol
-        except Exception as e:
-            self.logger.warning(f"MOL2 loading failed: {e}")
-            return None
-    
-    def _load_ligand_from_pdb(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load ligand from PDB file"""
-        try:
-            mol = Chem.MolFromPDBFile(file_path)
-            return mol
-        except Exception as e:
-            self.logger.warning(f"PDB ligand loading failed: {e}")
-            return None
-    
-    def _load_from_smiles_file(self, file_path: str) -> Optional[Chem.Mol]:
-        """Load molecule from SMILES file"""
-        try:
-            with open(file_path, 'r') as f:
-                smiles = f.readline().strip()
-            return self._load_ligand_from_smiles(smiles)
-        except Exception as e:
-            self.logger.warning(f"SMILES file loading failed: {e}")
-            return None
-    
-    def _load_ligand_from_smiles(self, smiles: str) -> Optional[Chem.Mol]:
-        """Load ligand from SMILES string"""
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            return mol
-        except Exception as e:
-            self.logger.warning(f"SMILES parsing failed: {e}")
-            return None
-    
-    def _generate_3d_coordinates(self, mol: Chem.Mol) -> None:
-        """Generate 3D coordinates for molecule"""
-        try:
-            # Embed molecule in 3D
-            AllChem.EmbedMolecule(mol, randomSeed=42, useExpTorsionAnglePrefs=True)
+                    molecules.append(mol_data)
+                else:
+                    errors.append(f"Failed to parse molecule at index {i}")
             
-            # Optimize geometry
-            try:
-                # Try MMFF94 first
-                if MMFFOptimizeMolecule(mol) != 0:
-                    # Fall back to UFF if MMFF94 fails
-                    UFFOptimizeMolecule(mol)
-            except:
-                self.logger.warning("Force field optimization failed")
+        except Exception as e:
+            raise ValueError(f"Failed to load SDF file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'sdf'
+        }
+    
+    def _load_mol_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load single MOL file"""
+        
+        try:
+            mol = Chem.MolFromMolFile(str(file_path), sanitize=False, removeHs=False)
+            
+            if mol is not None:
+                mol_data = {
+                    'molecule': mol,
+                    'index': 0,
+                    'properties': mol.GetPropsAsDict(),
+                    'source': file_path.name
+                }
+                return {
+                    'molecules': [mol_data],
+                    'errors': [],
+                    'format': 'mol'
+                }
+            else:
+                return {
+                    'molecules': [],
+                    'errors': ['Failed to parse MOL file'],
+                    'format': 'mol'
+                }
                 
         except Exception as e:
-            self.logger.warning(f"3D coordinate generation failed: {e}")
+            raise ValueError(f"Failed to load MOL file: {e}")
     
-    def _validate_protein_structure(self, protein_data: Dict[str, Any]) -> None:
-        """Validate protein structure quality"""
-        if not protein_data['atoms']:
-            raise ValueError("Protein structure contains no atoms")
+    def _load_pdb_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load PDB file"""
         
-        if not protein_data['residues']:
-            raise ValueError("Protein structure contains no residues")
+        molecules = []
+        errors = []
         
-        # Check for minimum number of atoms
-        if len(protein_data['atoms']) < 10:
-            self.logger.warning("Protein structure has very few atoms")
+        try:
+            # Try RDKit first
+            mol = Chem.MolFromPDBFile(str(file_path), sanitize=False, removeHs=False)
+            
+            if mol is not None:
+                mol_data = {
+                    'molecule': mol,
+                    'index': 0,
+                    'properties': {'source_pdb': str(file_path)},
+                    'source': file_path.name
+                }
+                molecules.append(mol_data)
+            else:
+                errors.append("RDKit failed to parse PDB file")
+            
+            # If BioPython is available, also load structural information
+            if BIO_AVAILABLE:
+                try:
+                    structure_info = self._parse_pdb_structure(file_path)
+                    if molecules:
+                        molecules[0]['structure_info'] = structure_info
+                except Exception as e:
+                    errors.append(f"BioPython PDB parsing failed: {e}")
         
-        # Check coordinate validity
-        coords = protein_data['coordinates']
-        if len(coords) > 0:
-            if np.any(np.isnan(coords)) or np.any(np.isinf(coords)):
-                raise ValueError("Protein structure contains invalid coordinates")
+        except Exception as e:
+            raise ValueError(f"Failed to load PDB file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'pdb'
+        }
     
-    def _validate_ligand_structure(self, mol: Chem.Mol) -> None:
-        """Validate ligand structure quality"""
-        if mol is None:
-            raise ValueError("Ligand molecule is None")
+    def _parse_pdb_structure(self, file_path: Path) -> Dict[str, Any]:
+        """Parse PDB structure using BioPython"""
         
-        if mol.GetNumAtoms() == 0:
-            raise ValueError("Ligand molecule contains no atoms")
+        if not BIO_AVAILABLE:
+            return {}
         
-        if mol.GetNumAtoms() > 200:
-            self.logger.warning("Ligand molecule is unusually large (>200 atoms)")
+        try:
+            parser = PDBParser(QUIET=True)
+            structure = parser.get_structure('protein', str(file_path))
+            
+            # Extract structural information
+            structure_info = {
+                'num_models': len(structure),
+                'chains': [],
+                'residues': [],
+                'atoms': 0
+            }
+            
+            for model in structure:
+                for chain in model:
+                    chain_info = {
+                        'chain_id': chain.id,
+                        'num_residues': len(chain),
+                        'residue_types': []
+                    }
+                    
+                    for residue in chain:
+                        structure_info['atoms'] += len(residue)
+                        residue_info = {
+                            'residue_id': residue.id,
+                            'residue_name': residue.resname,
+                            'num_atoms': len(residue)
+                        }
+                        structure_info['residues'].append(residue_info)
+                        chain_info['residue_types'].append(residue.resname)
+                    
+                    structure_info['chains'].append(chain_info)
+            
+            return structure_info
+            
+        except Exception as e:
+            self.logger.warning(f"PDB structure parsing failed: {e}")
+            return {}
+    
+    def _load_smiles_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load SMILES file"""
         
-        # Check for valid valences
+        molecules = []
+        errors = []
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for i, line in enumerate(f):
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        # Handle different SMILES formats
+                        parts = line.split()
+                        smiles = parts[0]
+                        mol_id = parts[1] if len(parts) > 1 else f"mol_{i}"
+                        
+                        try:
+                            mol = Chem.MolFromSmiles(smiles)
+                            if mol is not None:
+                                mol_data = {
+                                    'molecule': mol,
+                                    'index': i,
+                                    'properties': {'ID': mol_id, 'SMILES': smiles},
+                                    'source': f"{file_path.name}:{i}"
+                                }
+                                molecules.append(mol_data)
+                            else:
+                                errors.append(f"Invalid SMILES at line {i+1}: {smiles}")
+                        except Exception as e:
+                            errors.append(f"Error parsing SMILES at line {i+1}: {e}")
+        
+        except Exception as e:
+            raise ValueError(f"Failed to load SMILES file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'smiles'
+        }
+    
+    def _load_csv_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load CSV file containing molecular data"""
+        
+        molecules = []
+        errors = []
+        
+        try:
+            df = pd.read_csv(file_path)
+            
+            # Detect SMILES column
+            smiles_columns = ['SMILES', 'smiles', 'Smiles', 'CANONICAL_SMILES', 'canonical_smiles']
+            smiles_col = None
+            
+            for col in smiles_columns:
+                if col in df.columns:
+                    smiles_col = col
+                    break
+            
+            if smiles_col is None:
+                # Try first column if no standard SMILES column found
+                smiles_col = df.columns[0]
+                self.logger.warning(f"No standard SMILES column found, using {smiles_col}")
+            
+            # ID column detection
+            id_columns = ['ID', 'id', 'Id', 'NAME', 'name', 'Name', 'COMPOUND_ID']
+            id_col = None
+            
+            for col in id_columns:
+                if col in df.columns:
+                    id_col = col
+                    break
+            
+            # Process each row
+            for i, row in df.iterrows():
+                smiles = row[smiles_col]
+                
+                if pd.isna(smiles) or not smiles.strip():
+                    errors.append(f"Empty SMILES at row {i}")
+                    continue
+                
+                try:
+                    mol = Chem.MolFromSmiles(str(smiles).strip())
+                    if mol is not None:
+                        # Collect all properties
+                        properties = row.to_dict()
+                        if id_col:
+                            mol_id = str(row[id_col])
+                        else:
+                            mol_id = f"mol_{i}"
+                        
+                        mol_data = {
+                            'molecule': mol,
+                            'index': i,
+                            'properties': properties,
+                            'source': f"{file_path.name}:{i}",
+                            'id': mol_id
+                        }
+                        molecules.append(mol_data)
+                    else:
+                        errors.append(f"Invalid SMILES at row {i}: {smiles}")
+                except Exception as e:
+                    errors.append(f"Error parsing SMILES at row {i}: {e}")
+        
+        except Exception as e:
+            raise ValueError(f"Failed to load CSV file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'csv'
+        }
+    
+    def _load_json_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load JSON file containing molecular data"""
+        
+        molecules = []
+        errors = []
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            # Handle different JSON structures
+            if isinstance(data, list):
+                # List of molecules
+                mol_list = data
+            elif isinstance(data, dict) and 'molecules' in data:
+                # Dictionary with molecules key
+                mol_list = data['molecules']
+            else:
+                # Single molecule
+                mol_list = [data]
+            
+            for i, mol_data in enumerate(mol_list):
+                try:
+                    if 'smiles' in mol_data:
+                        smiles = mol_data['smiles']
+                        mol = Chem.MolFromSmiles(smiles)
+                    elif 'molblock' in mol_data:
+                        molblock = mol_data['molblock']
+                        mol = Chem.MolFromMolBlock(molblock)
+                    else:
+                        errors.append(f"No valid molecular representation in entry {i}")
+                        continue
+                    
+                    if mol is not None:
+                        molecule_entry = {
+                            'molecule': mol,
+                            'index': i,
+                            'properties': mol_data,
+                            'source': f"{file_path.name}:{i}"
+                        }
+                        molecules.append(molecule_entry)
+                    else:
+                        errors.append(f"Failed to parse molecule at entry {i}")
+                        
+                except Exception as e:
+                    errors.append(f"Error processing entry {i}: {e}")
+        
+        except Exception as e:
+            raise ValueError(f"Failed to load JSON file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'json'
+        }
+    
+    def _load_pickle_file(self, file_path: Path) -> Dict[str, Any]:
+        """Load pickled molecular data"""
+        
+        try:
+            with open(file_path, 'rb') as f:
+                data = pickle.load(f)
+            
+            molecules = []
+            errors = []
+            
+            # Handle different pickle structures
+            if isinstance(data, list):
+                for i, item in enumerate(data):
+                    if isinstance(item, Chem.Mol):
+                        mol_data = {
+                            'molecule': item,
+                            'index': i,
+                            'properties': item.GetPropsAsDict(),
+                            'source': f"{file_path.name}:{i}"
+                        }
+                        molecules.append(mol_data)
+            elif isinstance(data, dict):
+                if 'molecules' in data:
+                    mol_list = data['molecules']
+                    for i, mol in enumerate(mol_list):
+                        if isinstance(mol, Chem.Mol):
+                            mol_data = {
+                                'molecule': mol,
+                                'index': i,
+                                'properties': mol.GetPropsAsDict(),
+                                'source': f"{file_path.name}:{i}"
+                            }
+                            molecules.append(mol_data)
+            elif isinstance(data, Chem.Mol):
+                mol_data = {
+                    'molecule': data,
+                    'index': 0,
+                    'properties': data.GetPropsAsDict(),
+                    'source': file_path.name
+                }
+                molecules.append(mol_data)
+            
+            return {
+                'molecules': molecules,
+                'errors': errors,
+                'format': 'pickle'
+            }
+            
+        except Exception as e:
+            raise ValueError(f"Failed to load pickle file: {e}")
+    
+    def _load_compressed_sdf(self, file_path: Path) -> Dict[str, Any]:
+        """Load compressed SDF file"""
+        
+        molecules = []
+        errors = []
+        
+        try:
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                # Create temporary uncompressed content
+                content = f.read()
+                
+                # Parse SDF content
+                mol_blocks = content.split('$$$$')
+                
+                for i, mol_block in enumerate(mol_blocks):
+                    mol_block = mol_block.strip()
+                    if mol_block:
+                        try:
+                            mol = Chem.MolFromMolBlock(mol_block)
+                            if mol is not None:
+                                mol_data = {
+                                    'molecule': mol,
+                                    'index': i,
+                                    'properties': mol.GetPropsAsDict(),
+                                    'source': f"{file_path.name}:{i}"
+                                }
+                                molecules.append(mol_data)
+                            else:
+                                errors.append(f"Failed to parse molecule block {i}")
+                        except Exception as e:
+                            errors.append(f"Error parsing molecule block {i}: {e}")
+        
+        except Exception as e:
+            raise ValueError(f"Failed to load compressed SDF file: {e}")
+        
+        return {
+            'molecules': molecules,
+            'errors': errors,
+            'format': 'sdf_gz'
+        }
+    
+    def _load_compressed_pdb(self, file_path: Path) -> Dict[str, Any]:
+        """Load compressed PDB file"""
+        
+        try:
+            with gzip.open(file_path, 'rt', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Write to temporary file for RDKit
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.pdb', delete=False) as tmp_file:
+                tmp_file.write(content)
+                tmp_path = tmp_file.name
+            
+            try:
+                # Load using PDB loader
+                result = self._load_pdb_file(Path(tmp_path))
+                result['format'] = 'pdb_gz'
+                return result
+            finally:
+                # Clean up temporary file
+                os.unlink(tmp_path)
+                
+        except Exception as e:
+            raise ValueError(f"Failed to load compressed PDB file: {e}")
+    
+    def _load_unknown_format(self, file_path: Path) -> Dict[str, Any]:
+        """Attempt to load unknown format"""
+        
+        # Try different parsers
+        parsers = [
+            ('sdf', self._load_sdf_file),
+            ('smiles', self._load_smiles_file),
+            ('pdb', self._load_pdb_file)
+        ]
+        
+        for format_name, parser in parsers:
+            try:
+                result = parser(file_path)
+                if result['molecules']:
+                    self.logger.info(f"Successfully parsed unknown format as {format_name}")
+                    result['format'] = f"{format_name}_detected"
+                    return result
+            except Exception:
+                continue
+        
+        raise ValueError(f"Unable to determine file format or parse file: {file_path}")
+    
+    def _process_loaded_molecules(self, loading_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Process and validate loaded molecules"""
+        
+        molecules = loading_result['molecules']
+        valid_molecules = []
+        invalid_molecules = []
+        
+        for mol_data in molecules:
+            try:
+                mol = mol_data['molecule']
+                
+                # Apply molecular processing
+                if self.config.sanitize_molecules:
+                    mol = self.structure_processors['sanitize'](mol)
+                
+                if self.config.remove_salts:
+                    mol = self.structure_processors['remove_salts'](mol)
+                
+                if self.config.neutralize_charges:
+                    mol = self.structure_processors['neutralize'](mol)
+                
+                if self.config.add_hydrogens:
+                    mol = self.structure_processors['add_hydrogens'](mol)
+                
+                if self.config.generate_3d_coords and mol.GetNumConformers() == 0:
+                    mol = self.structure_processors['generate_3d'](mol)
+                
+                # Validate processed molecule
+                if self.config.validate_structures:
+                    validation_result = self._validate_molecule(mol)
+                    if not validation_result['valid']:
+                        mol_data['validation_errors'] = validation_result['errors']
+                        invalid_molecules.append(mol_data)
+                        continue
+                
+                # Update molecule in data
+                mol_data['molecule'] = mol
+                mol_data['processed'] = True
+                
+                # Add computed properties
+                mol_data['computed_properties'] = self._compute_molecular_properties(mol)
+                
+                valid_molecules.append(mol_data)
+                
+            except Exception as e:
+                mol_data['processing_error'] = str(e)
+                invalid_molecules.append(mol_data)
+                
+                if self.config.strict_mode:
+                    raise ValueError(f"Molecular processing failed in strict mode: {e}")
+        
+        return {
+            'valid_molecules': valid_molecules,
+            'invalid_molecules': invalid_molecules,
+            'processing_errors': loading_result.get('errors', [])
+        }
+    
+    def _validate_molecule(self, mol: Chem.Mol) -> Dict[str, Any]:
+        """Validate molecule using all validators"""
+        
+        errors = []
+        
+        for validator_name, validator_func in self.molecular_validators.items():
+            try:
+                is_valid, error_msg = validator_func(mol)
+                if not is_valid:
+                    errors.append(f"{validator_name}: {error_msg}")
+            except Exception as e:
+                errors.append(f"{validator_name}: Validation failed - {e}")
+        
+        return {
+            'valid': len(errors) == 0,
+            'errors': errors
+        }
+    
+    def _validate_structure(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate basic molecular structure"""
         try:
             Chem.SanitizeMol(mol)
-        except:
-            raise ValueError("Ligand molecule has invalid valences")
-        
-        # Check molecular properties
-        mw = Descriptors.MolWt(mol)
-        if mw > 1000:  # Da
-            self.logger.warning(f"Ligand molecular weight is high: {mw:.1f} Da")
+            return True, ""
+        except Exception as e:
+            return False, f"Structure validation failed: {e}"
     
-    def get_binding_site_residues(self, 
-                                 protein_data: Dict[str, Any], 
-                                 ligand_center: np.ndarray,
-                                 radius: float = 8.0) -> List[Dict[str, Any]]:
-        """
-        Find binding site residues within radius of ligand center
-        
-        Args:
-            protein_data: Protein structure data
-            ligand_center: Center coordinates of ligand
-            radius: Search radius in Angstroms
-            
-        Returns:
-            List of binding site residues
-        """
-        binding_site_residues = []
-        
-        for residue in protein_data['residues']:
-            residue_center = residue['center']
-            distance = np.linalg.norm(residue_center - ligand_center)
-            
-            if distance <= radius:
-                residue_copy = residue.copy()
-                residue_copy['distance_to_ligand'] = distance
-                binding_site_residues.append(residue_copy)
-        
-        # Sort by distance
-        binding_site_residues.sort(key=lambda x: x['distance_to_ligand'])
-        
-        return binding_site_residues
+    def _validate_atom_count(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate atom count"""
+        atom_count = mol.GetNumAtoms()
+        if atom_count < self.config.min_atoms:
+            return False, f"Too few atoms: {atom_count} < {self.config.min_atoms}"
+        if atom_count > self.config.max_atoms:
+            return False, f"Too many atoms: {atom_count} > {self.config.max_atoms}"
+        return True, ""
     
-    def calculate_protein_properties(self, protein_data: Dict[str, Any]) -> Dict[str, float]:
-        """
-        Calculate basic protein properties
+    def _validate_element_types(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate element types"""
+        elements = set(atom.GetSymbol() for atom in mol.GetAtoms())
+        invalid_elements = elements - self.config.allowed_elements
+        if invalid_elements:
+            return False, f"Invalid elements: {invalid_elements}"
+        return True, ""
+    
+    def _validate_connectivity(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate molecular connectivity"""
+        # Check for disconnected fragments
+        fragments = Chem.GetMolFrags(mol)
+        if len(fragments) > 1:
+            return False, f"Molecule has {len(fragments)} disconnected fragments"
+        return True, ""
+    
+    def _validate_charge_state(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate charge state"""
+        formal_charge = Chem.rdmolops.GetFormalCharge(mol)
+        if abs(formal_charge) > 3:  # Reasonable charge limit
+            return False, f"Extreme formal charge: {formal_charge}"
+        return True, ""
+    
+    def _validate_stereochemistry(self, mol: Chem.Mol) -> Tuple[bool, str]:
+        """Validate stereochemistry"""
+        try:
+            # Check for valid stereochemistry
+            Chem.AssignStereochemistry(mol)
+            return True, ""
+        except Exception as e:
+            return False, f"Stereochemistry validation failed: {e}"
+    
+    def _sanitize_molecule(self, mol: Chem.Mol) -> Chem.Mol:
+        """Sanitize molecule"""
+        mol_copy = Chem.Mol(mol)
+        Chem.SanitizeMol(mol_copy)
+        return mol_copy
+    
+    def _add_hydrogens(self, mol: Chem.Mol) -> Chem.Mol:
+        """Add hydrogens to molecule"""
+        return Chem.AddHs(mol)
+    
+    def _remove_salts(self, mol: Chem.Mol) -> Chem.Mol:
+        """Remove salts and keep largest fragment"""
+        return Chem.rdMolStandardize.StandardizeSmiles(Chem.MolToSmiles(mol))
+    
+    def _neutralize_charges(self, mol: Chem.Mol) -> Chem.Mol:
+        """Neutralize charges"""
+        try:
+            from rdkit.Chem.MolStandardize import rdMolStandardize
+            neutralizer = rdMolStandardize.Neutralizer()
+            return neutralizer.neutralize(mol)
+        except ImportError:
+            # Fallback: just return original molecule
+            return mol
+    
+    def _generate_3d_coordinates(self, mol: Chem.Mol) -> Chem.Mol:
+        """Generate 3D coordinates"""
+        mol_copy = Chem.Mol(mol)
+        AllChem.EmbedMolecule(mol_copy, useExpTorsionAnglePrefs=True, useBasicKnowledge=True)
+        return mol_copy
+    
+    def _optimize_molecular_geometry(self, mol: Chem.Mol) -> Chem.Mol:
+        """Optimize molecular geometry"""
+        mol_copy = Chem.Mol(mol)
+        AllChem.OptimizeMoleculeConfigs(mol_copy)
+        return mol_copy
+    
+    def _compute_molecular_properties(self, mol: Chem.Mol) -> Dict[str, Any]:
+        """Compute molecular properties"""
         
-        Args:
-            protein_data: Protein structure data
-            
-        Returns:
-            Dictionary of protein properties
-        """
-        properties = {
-            'num_atoms': len(protein_data['atoms']),
-            'num_residues': len(protein_data['residues']),
-            'num_chains': len(protein_data['chains']),
-            'molecular_weight': 0.0,
-            'center_of_mass': np.zeros(3)
-        }
+        properties = {}
         
-        # Calculate molecular weight and center of mass
-        total_mass = 0.0
-        weighted_coords = np.zeros(3)
+        # Basic descriptors
+        try:
+            properties['molecular_weight'] = Descriptors.MolWt(mol)
+            properties['logp'] = Descriptors.MolLogP(mol)
+            properties['tpsa'] = Descriptors.TPSA(mol)
+            properties['hbd'] = Descriptors.NumHDonors(mol)
+            properties['hba'] = Descriptors.NumHAcceptors(mol)
+            properties['rotatable_bonds'] = Descriptors.NumRotatableBonds(mol)
+            properties['aromatic_rings'] = rdMolDescriptors.CalcNumAromaticRings(mol)
+            properties['heavy_atoms'] = Descriptors.HeavyAtomCount(mol)
+        except Exception as e:
+            self.logger.warning(f"Basic descriptor calculation failed: {e}")
         
-        for atom in protein_data['atoms']:
-            element = atom['element']
-            mass = ATOMIC_MASSES.get(element, 12.0)  # Default to carbon mass
-            
-            total_mass += mass
-            weighted_coords += mass * atom['coord']
+        # Extended descriptors
+        try:
+            properties['bertz_ct'] = rdMolDescriptors.BertzCT(mol)
+            properties['balaban_j'] = rdMolDescriptors.BalabanJ(mol)
+        except Exception as e:
+            self.logger.warning(f"Extended descriptor calculation failed: {e}")
         
-        if total_mass > 0:
-            properties['molecular_weight'] = total_mass
-            properties['center_of_mass'] = weighted_coords / total_mass
+        # Pharmacophore features
+        if self.feature_factory:
+            try:
+                features = self.feature_factory.GetFeaturesForMol(mol)
+                feature_counts = {}
+                for feat in features:
+                    feat_type = feat.GetFamily()
+                    feature_counts[feat_type] = feature_counts.get(feat_type, 0) + 1
+                properties['pharmacophore_features'] = feature_counts
+            except Exception as e:
+                self.logger.warning(f"Pharmacophore feature calculation failed: {e}")
         
         return properties
     
-    def save_structure(self, 
-                      protein_data: Dict[str, Any], 
-                      output_path: str,
-                      format: str = 'pdb') -> None:
-        """
-        Save protein structure to file
+    def _generate_file_metadata(self, 
+                               file_path: Path, 
+                               file_format: str, 
+                               processed_result: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate comprehensive file metadata"""
         
-        Args:
-            protein_data: Protein structure data
-            output_path: Output file path
-            format: Output format ('pdb')
-        """
-        try:
-            if format.lower() == 'pdb':
-                structure = protein_data['structure']
-                io = PDBIO()
-                io.set_structure(structure)
-                io.save(output_path)
-                self.logger.info(f"Structure saved to {output_path}")
-            else:
-                raise ValueError(f"Unsupported output format: {format}")
+        metadata = {
+            'file_info': {
+                'path': str(file_path),
+                'name': file_path.name,
+                'size_bytes': file_path.stat().st_size,
+                'format': file_format,
+                'modified_time': file_path.stat().st_mtime
+            },
+            'processing_summary': {
+                'total_molecules_found': len(processed_result['valid_molecules']) + len(processed_result['invalid_molecules']),
+                'valid_molecules': len(processed_result['valid_molecules']),
+                'invalid_molecules': len(processed_result['invalid_molecules']),
+                'success_rate': len(processed_result['valid_molecules']) / max(1, len(processed_result['valid_molecules']) + len(processed_result['invalid_molecules'])),
+                'processing_errors': len(processed_result['processing_errors'])
+            },
+            'molecular_statistics': self._calculate_molecular_statistics(processed_result['valid_molecules']),
+            'processing_config': {
+                'sanitize_molecules': self.config.sanitize_molecules,
+                'add_hydrogens': self.config.add_hydrogens,
+                'generate_3d_coords': self.config.generate_3d_coords,
+                'validate_structures': self.config.validate_structures
+            }
+        }
+        
+        return metadata
+    
+    def _calculate_molecular_statistics(self, molecules: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Calculate statistics for loaded molecules"""
+        
+        if not molecules:
+            return {}
+        
+        # Extract properties
+        properties = []
+        for mol_data in molecules:
+            comp_props = mol_data.get('computed_properties', {})
+            properties.append(comp_props)
+        
+        if not properties:
+            return {}
+        
+        # Calculate statistics
+        stats = {}
+        
+        numeric_props = ['molecular_weight', 'logp', 'tpsa', 'hbd', 'hba', 'rotatable_bonds', 'aromatic_rings']
+        
+        for prop in numeric_props:
+            values = [p.get(prop, 0) for p in properties if prop in p]
+            if values:
+                stats[prop] = {
+                    'mean': np.mean(values),
+                    'std': np.std(values),
+                    'min': np.min(values),
+                    'max': np.max(values),
+                    'median': np.median(values)
+                }
+        
+        return stats
+    
+    def load_multiple_files(self, 
+                           file_paths: List[Union[str, Path]],
+                           parallel: bool = None) -> Dict[str, Any]:
+        """Load multiple molecular files"""
+        
+        if parallel is None:
+            parallel = self.config.parallel_loading
+        
+        start_time = time.time()
+        results = []
+        
+        if parallel and len(file_paths) > 1:
+            # Parallel loading
+            with ThreadPoolExecutor(max_workers=self.config.max_workers) as executor:
+                futures = {executor.submit(self.load_molecular_file, fp): fp for fp in file_paths}
                 
-        except Exception as e:
-            self.logger.error(f"Failed to save structure: {e}")
-            raise
-    
-    def clear_cache(self) -> None:
-        """Clear structure cache"""
-        self._structure_cache.clear()
-        self.logger.info("Structure cache cleared")
-    
-    def get_cache_info(self) -> Dict[str, int]:
-        """Get cache information"""
+                for future in as_completed(futures):
+                    file_path = futures[future]
+                    try:
+                        result = future.result(timeout=self.config.timeout_seconds)
+                        results.append(result)
+                    except Exception as e:
+                        self.logger.error(f"Failed to load {file_path}: {e}")
+                        results.append({
+                            'molecules': [],
+                            'success': False,
+                            'error': str(e),
+                            'file_path': str(file_path)
+                        })
+        else:
+            # Sequential loading
+            for file_path in file_paths:
+                result = self.load_molecular_file(file_path)
+                results.append(result)
+        
+        # Combine results
+        all_molecules = []
+        all_errors = []
+        successful_files = 0
+        
+        for result in results:
+            if result['success']:
+                all_molecules.extend(result['molecules'])
+                successful_files += 1
+            else:
+                all_errors.append(result)
+        
+        processing_time = time.time() - start_time
+        
         return {
-            'cached_structures': len(self._structure_cache),
-            'cache_size_mb': self._estimate_cache_size()
+            'molecules': all_molecules,
+            'failed_files': all_errors,
+            'total_files': len(file_paths),
+            'successful_files': successful_files,
+            'total_molecules': len(all_molecules),
+            'processing_time': processing_time,
+            'success': successful_files > 0
         }
     
-    def _estimate_cache_size(self) -> float:
-        """Estimate cache size in MB"""
-        # Rough estimation based on number of cached structures
-        return len(self._structure_cache) * 5.0  # Assume ~5MB per structure
+    def get_loading_statistics(self) -> Dict[str, Any]:
+        """Get comprehensive loading statistics"""
+        
+        return {
+            'session_statistics': self.loading_stats.copy(),
+            'configuration': {
+                'max_file_size': self.config.max_file_size,
+                'parallel_loading': self.config.parallel_loading,
+                'max_workers': self.config.max_workers,
+                'sanitize_molecules': self.config.sanitize_molecules,
+                'validate_structures': self.config.validate_structures
+            },
+            'supported_formats': [
+                'sdf', 'mol', 'pdb', 'smiles', 'csv', 'json', 'pickle',
+                'sdf.gz', 'pdb.gz'
+            ],
+            'validation_criteria': {
+                'min_atoms': self.config.min_atoms,
+                'max_atoms': self.config.max_atoms,
+                'allowed_elements': list(self.config.allowed_elements)
+            }
+        }
+
+# Example usage and validation
+if __name__ == "__main__":
+    # Test the real molecular loader
+    config = MolecularLoaderConfig(
+        sanitize_molecules=True,
+        add_hydrogens=True,
+        generate_3d_coords=True,
+        validate_structures=True,
+        parallel_loading=False  # Disable for testing
+    )
+    
+    loader = RealMolecularLoader(config)
+    
+    print("Testing real molecular loader...")
+    
+    # Test with sample SMILES data
+    test_smiles = [
+        "CC(=O)OC1=CC=CC=C1C(=O)O",  # Aspirin
+        "COC1=CC=C(C=C1)C2=CC(=O)OC3=C2C=CC(=C3)O",  # Quercetin-like
+        "CC(C)CC1=CC=C(C=C1)C(C)C(=O)O"  # Ibuprofen
+    ]
+    
+    # Create temporary SMILES file
+    import tempfile
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.smiles', delete=False) as tmp_file:
+        for i, smiles in enumerate(test_smiles):
+            tmp_file.write(f"{smiles} mol_{i}\n")
+        tmp_path = tmp_file.name
+    
+    try:
+        # Test file loading
+        result = loader.load_molecular_file(tmp_path)
+        
+        print(f"Loading success: {result['success']}")
+        print(f"Molecules loaded: {len(result['molecules'])}")
+        print(f"Processing time: {result['processing_time']:.3f} seconds")
+        
+        if result['molecules']:
+            mol_data = result['molecules'][0]
+            props = mol_data['computed_properties']
+            print(f"First molecule MW: {props.get('molecular_weight', 'N/A'):.2f}")
+            print(f"First molecule LogP: {props.get('logp', 'N/A'):.2f}")
+        
+        # Test statistics
+        stats = loader.get_loading_statistics()
+        print(f"\nSession statistics:")
+        print(f"Files processed: {stats['session_statistics']['files_processed']}")
+        print(f"Molecules loaded: {stats['session_statistics']['molecules_loaded']}")
+        
+    finally:
+        # Clean up
+        os.unlink(tmp_path)
+    
+    print("\nReal molecular loader validation completed successfully!")
