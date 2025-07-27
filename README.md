@@ -492,7 +492,7 @@ We welcome contributions from the quantum computing and computational chemistry 
 #### 1. Development Setup
 ```bash
 # Fork and clone the repository
-git clone https://github.com/hofong428/pharmflow-quantum-docking.git
+git clone https://github.com/codebatai/pharmflow-quantum-docking.git
 cd pharmflow-quantum-docking
 
 # Set up development environment
