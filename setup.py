@@ -57,7 +57,7 @@ setup(
         "Topic :: Scientific/Engineering :: Chemistry",
         "Topic :: Scientific/Engineering :: Physics",
         "Topic :: Scientific/Engineering :: Bio-Informatics",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
@@ -153,7 +153,7 @@ setup(
         "protein-ligand interactions"
     ],
     platforms=["any"],
-    license="MIT",
+    license="Apache Software License",
     test_suite="tests",
     tests_require=[
         "pytest>=6.0",
