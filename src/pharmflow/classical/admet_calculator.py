@@ -13,9 +13,6 @@
 # limitations under the License.
 
 """
-File description here
-"""
-"""
 ADMET (Absorption, Distribution, Metabolism, Excretion, Toxicity) Calculator
 Comprehensive drug-likeness and pharmacokinetic property prediction
 """
