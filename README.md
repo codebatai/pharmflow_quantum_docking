@@ -37,3 +37,24 @@ PharmFlow presents an innovative quantum molecular docking algorithm that combin
 git clone https://github.com/pharmflow/quantum-docking.git
 cd pharmflow_quantum_docking
 pip install -e .
+```
+### **Citations**
+If you use PharmFlow in your research, please cite:
+bibtex@software{pharmflow_quantum_docking_2025,
+  author = {PharmFlow/Codebat Technology},
+  title = {PharmFlow: QAOA and Pharmacophore-Optimized Quantum Molecular Docking},
+  url = {https://github.com/pharmflow/quantum-docking},
+  year = {2025},
+  version = {1.0.0}
+}
+### **Acknowledgments**
+- **Qiskit Team**: For the quantum computing framework
+- **RDKit Community**: For molecular processing tools
+- **OpenFermion Team**: For quantum chemistry utilities
+
+### **Contact**
+
+-  **Website**: https://pharmflow.ai
+-  **Issues**: GitHub Issues
+-  **Discussions**: GitHub Discussions
+-  **Email**: contact@pharmflow.ai
