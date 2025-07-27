@@ -1,0 +1,43 @@
+# Quantum Computing
+qiskit>=1.0.0
+qiskit-algorithms>=0.2.0
+qiskit-nature>=0.7.0
+qiskit-chemistry>=0.6.0
+
+# Quantum Libraries
+pennylane>=0.32.0
+pennylane-qiskit>=0.32.0
+
+# Molecular Processing
+rdkit-pypi>=2023.3.1
+openfermion>=1.5.0
+openfermionpyscf>=0.5.0
+biopython>=1.81
+
+# Scientific Computing
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Visualization
+py3Dmol>=2.0.1
+plotly>=5.15.0
+ipywidgets>=8.0.0
+
+# Development
+jupyter>=1.0.0
+pytest>=7.0.0
+pytest-cov>=4.0.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Performance
+numba>=0.57.0
+joblib>=1.3.0
