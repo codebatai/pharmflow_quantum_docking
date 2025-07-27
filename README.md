@@ -608,9 +608,9 @@ See [NOTICE](NOTICE) file for complete attribution details.
 ## 📞 Support & Contact
 
 #### 💬 Community Support
-- **💬 GitHub Discussions**: [Community Forum](https://github.com/hofong428/pharmflow-quantum-docking/discussions)
-- **🐛 Bug Reports**: [GitHub Issues](https://github.com/hofong428/pharmflow-quantum-docking/issues)
-- **💡 Feature Requests**: [Enhancement Proposals](https://github.com/hofong428/pharmflow-quantum-docking/issues/new?template=feature_request.md)
+- **💬 GitHub Discussions**: [Community Forum](https://github.com/codebatai/pharmflow-quantum-docking/discussions)
+- **🐛 Bug Reports**: [GitHub Issues](https://github.com/codebatai/pharmflow-quantum-docking/issues)
+- **💡 Feature Requests**: [Enhancement Proposals](https://github.com/codebatai/pharmflow-quantum-docking/issues/new?template=feature_request.md)
 
 #### 📧 Direct Contact
 - **✉️ General Inquiries**: pharmflow-support@codebat.ai
@@ -628,8 +628,7 @@ For enterprise deployments, custom development, and commercial licensing:
 ### 🤝 Community Involvement
 
 We encourage community participation in roadmap planning:
-- **📝 Roadmap Discussions**: [GitHub Discussions](https://github.com/hofong428/pharmflow-quantum-docking/discussions/categories/roadmap)
-- **🗳️ Feature Voting**: [Community Polls](https://github.com/hofong428/pharmflow-quantum-docking/discussions/categories/polls)
+- **🗳️ Feature Voting**: [Community Polls](https://github.com/codebatai/pharmflow-quantum-docking/discussions/categories/polls)
 - **💡 Innovation Labs**: Quarterly hackathons and ideation sessions
 - **📧 Roadmap Updates**: Subscribe to our newsletter for regular updates
 
