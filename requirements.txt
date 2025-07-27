@@ -1,43 +1,115 @@
+# PharmFlow Quantum Molecular Docking - Core Dependencies
+
 # Quantum Computing
-qiskit>=1.0.0
+qiskit>=0.45.0
+qiskit-aer>=0.12.0
 qiskit-algorithms>=0.2.0
-qiskit-nature>=0.7.0
-qiskit-chemistry>=0.6.0
-
-# Quantum Libraries
-pennylane>=0.32.0
-pennylane-qiskit>=0.32.0
-
-# Molecular Processing
-rdkit-pypi>=2023.3.1
-openfermion>=1.5.0
-openfermionpyscf>=0.5.0
-biopython>=1.81
+qiskit-optimization>=0.5.0
 
 # Scientific Computing
-numpy>=1.24.0
-scipy>=1.10.0
-pandas>=2.0.0
-matplotlib>=3.7.0
-seaborn>=0.12.0
+numpy>=1.21.0
+scipy>=1.7.0
+pandas>=1.3.0
+
+# Cheminformatics
+rdkit>=2022.9.1
+chembl-webresource-client>=0.10.0
+pubchempy>=1.0.4
 
 # Machine Learning
-scikit-learn>=1.3.0
-torch>=2.0.0
-torchvision>=0.15.0
+scikit-learn>=1.0.0
+tensorflow>=2.8.0
+torch>=1.12.0
+
+# Molecular Modeling
+openmm>=7.7.0
+mdtraj>=1.9.0
+pymol-open-source>=2.5.0
+
+# Optimization
+cvxpy>=1.2.0
+pulp>=2.6.0
+pyomo>=6.4.0
 
 # Visualization
-py3Dmol>=2.0.1
-plotly>=5.15.0
-ipywidgets>=8.0.0
+matplotlib>=3.5.0
+seaborn>=0.11.0
+plotly>=5.0.0
+bokeh>=2.4.0
+ipywidgets>=7.6.0
 
-# Development
+# Data Processing
+h5py>=3.6.0
+tables>=3.7.0
+xlsxwriter>=3.0.0
+openpyxl>=3.0.0
+
+# Web Interface
+flask>=2.0.0
+dash>=2.0.0
+streamlit>=1.10.0
+
+# File Handling
+pyyaml>=6.0
+toml>=0.10.0
+configparser>=5.2.0
+
+# Parallel Computing
+joblib>=1.1.0
+dask>=2022.0.0
+multiprocessing-logging>=0.3.0
+
+# System Utilities
+tqdm>=4.62.0
+click>=8.0.0
+colorlog>=6.6.0
+psutil>=5.8.0
+
+# Database
+sqlalchemy>=1.4.0
+
+# Network
+requests>=2.26.0
+urllib3>=1.26.0
+
+# Testing (for development)
+pytest>=6.0.0
+pytest-cov>=2.0.0
+pytest-mock>=3.0.0
+
+# Code Quality (for development)
+black>=22.0.0
+flake8>=4.0.0
+mypy>=0.900
+isort>=5.0.0
+
+# Documentation (for development)
+sphinx>=4.0.0
+sphinx-rtd-theme>=1.0.0
+nbsphinx>=0.8.0
+
+# Jupyter Notebooks (for development)
 jupyter>=1.0.0
-pytest>=7.0.0
-pytest-cov>=4.0.0
-black>=23.0.0
-flake8>=6.0.0
+jupyterlab>=3.0.0
+notebook>=6.4.0
 
-# Performance
-numba>=0.57.0
-joblib>=1.3.0
+# Performance Monitoring
+memory-profiler>=0.60.0
+line-profiler>=3.5.0
+py-spy>=0.3.0
+
+# Security
+cryptography>=3.4.0
+keyring>=23.0.0
+
+# Additional Chemistry Tools
+biopython>=1.79
+prody>=2.0
+biotite>=0.34.0
+
+# Quantum Chemistry (optional)
+pyscf>=2.0.0
+psi4>=1.6.0
+
+# GPU Support (optional)
+cupy-cuda11x>=10.0.0; platform_machine == "x86_64"
